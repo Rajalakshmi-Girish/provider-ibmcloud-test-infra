@@ -55,39 +55,36 @@ install_terraform_x86(){
     fi
 }
 
-build_ibm_provider(){
-    if [[ ! -f "${TF_PLUGIN_PATH}/IBM-Cloud/ibm/${TERRAFORM_PROVIDER_IBM_VERSION}/linux_${ARCH}/terraform-provider-ibm" ]]; then
-        cd /tmp
-        curl -fsSL https://github.com/IBM-Cloud/terraform-provider-ibm/archive/refs/tags/v${TERRAFORM_PROVIDER_IBM_VERSION}.zip -o ./terraform-provider-ibm.zip
-        unzip -o ./terraform-provider-ibm.zip  >/dev/null 2>&1
-        rm -f ./terraform-provider-ibm.zip
-        cd terraform-provider-ibm-${TERRAFORM_PROVIDER_IBM_VERSION}
-        go build -ldflags="${GO_LDFLAGS}" .
-        mkdir -p ${TF_PLUGIN_PATH}/IBM-Cloud/ibm/${TERRAFORM_PROVIDER_IBM_VERSION}/linux_`go env GOARCH`
-        cp -f terraform-provider-ibm ${TF_PLUGIN_PATH}/IBM-Cloud/ibm/${TERRAFORM_PROVIDER_IBM_VERSION}/linux_`go env GOARCH`
+build_provider(){
+    local PROVIDER_NAME=$1
+    local PROVIDER_VERSION=$2
+    local PROVIDER_REPO=$3
+    
+    VERSIONED_NAME="terraform-provider-${PROVIDER_NAME}-v${PROVIDER_VERSION}"
+    
+    if [[ -f "${TF_PLUGIN_PATH}/${VERSIONED_NAME}" ]]; then
+        echo "Provider ${PROVIDER_NAME} already exists at ${TF_PLUGIN_PATH}/${VERSIONED_NAME}"
+        return
     fi
-}
-
-build_null_provider(){
-    if [[ ! -f "${TF_PLUGIN_PATH}/hashicorp/null/${TERRAFORM_PROVIDER_NULL_VERSION}/linux_${ARCH}/terraform-provider-null" ]]; then
-        echo "building null provider"
-        cd /tmp
-        curl -fsSL https://github.com/hashicorp/terraform-provider-null/archive/refs/tags/v${TERRAFORM_PROVIDER_NULL_VERSION}.zip -o ./terraform-provider-null.zip
-        unzip -o ./terraform-provider-null.zip  >/dev/null 2>&1
-        rm -f ./terraform-provider-null.zip
-        cd terraform-provider-null-${TERRAFORM_PROVIDER_NULL_VERSION}
-        go build -ldflags="${GO_LDFLAGS}" .
-        mkdir -p ${TF_PLUGIN_PATH}/hashicorp/null/${TERRAFORM_PROVIDER_NULL_VERSION}/linux_`go env GOARCH`
-        cp terraform-provider-null ${TF_PLUGIN_PATH}/hashicorp/null/${TERRAFORM_PROVIDER_NULL_VERSION}/linux_`go env GOARCH`
-    fi
+    
+    echo "Building ${PROVIDER_NAME} provider v${PROVIDER_VERSION}..."
+    cd /tmp
+    curl -fsSL ${PROVIDER_REPO}/archive/refs/tags/v${PROVIDER_VERSION}.zip -o ./terraform-provider-${PROVIDER_NAME}.zip
+    unzip -o ./terraform-provider-${PROVIDER_NAME}.zip >/dev/null 2>&1
+    rm -f ./terraform-provider-${PROVIDER_NAME}.zip
+    cd terraform-provider-${PROVIDER_NAME}-${PROVIDER_VERSION}
+    go build -ldflags="${GO_LDFLAGS}" .
+    mkdir -p "${TF_PLUGIN_PATH}"
+    cp -f terraform-provider-${PROVIDER_NAME} ${TF_PLUGIN_PATH}/${VERSIONED_NAME}
+    echo "Built ${VERSIONED_NAME}"
 }
 
 ARCH=$(uname -m)
 
 if [[ "${ARCH}" == "ppc64le" || "${ARCH}" == "s390x" ]]; then
     install_terraform
-    build_ibm_provider
-    build_null_provider
+    build_provider "ibm" "${TERRAFORM_PROVIDER_IBM_VERSION}" "https://github.com/IBM-Cloud/terraform-provider-ibm"
+    build_provider "null" "${TERRAFORM_PROVIDER_NULL_VERSION}" "https://github.com/hashicorp/terraform-provider-null"
 elif [[ "${ARCH}" == "x86_64" ]]; then
     install_terraform_x86
 fi

@@ -48,6 +48,18 @@ COS_HMAC_ACCESS_KEY?=
 COS_HMAC_SECRET_KEY?=
 # Option 2: Provide a JSON service credentials file (keys will be extracted and set to COS_HMAC_ACCESS_KEY/COS_HMAC_SECRET_KEY)
 COS_SERVICE_CREDENTIALS_PATH?=
+
+# Shell function to get versioned provider names (reused across targets)
+define GET_VERSIONED_NAME
+get_versioned_name() { \
+	case "$$1" in \
+		terraform-provider-ibm) echo "terraform-provider-ibm-v$$TERRAFORM_PROVIDER_IBM_VERSION" ;; \
+		terraform-provider-null) echo "terraform-provider-null-v$$TERRAFORM_PROVIDER_NULL_VERSION" ;; \
+		*) echo "$$1" ;; \
+	esac; \
+}
+endef
+
 # ==============================================================================
 
 install-prereq: ## Install prerequisites (Ansible and Terraform)
@@ -58,8 +70,11 @@ install-ansible: ## Install Ansible
 	./hack/ansible_install.sh
 .PHONY: install-ansible
 
-setup-tf: ## Install Terraform
+setup-tf: ## Install Terraform and place plugins
 	./hack/terraform_install.sh
+	@if [ "$$(uname -m)" = "ppc64le" ] || [ "$$(uname -m)" = "s390x" ]; then \
+		$(MAKE) place-tf-plugins; \
+	fi
 .PHONY: setup-tf
 
 build-deployer-tf: ## Build the kubetest2-tf deployer binary
@@ -71,43 +86,38 @@ build-deployer-tf: ## Build the kubetest2-tf deployer binary
 build-tf-and-plugins: ## Build Terraform binary and plugins for ppc64le
 	@echo "Building terraform binary and plugins..."
 	@mkdir -p $(OUT_DIR)
-	@mkdir -p $(OUT_DIR)/plugins
-	TF_INSTALL_DIR=$(OUT_DIR) TF_PLUGIN_PATH=$(OUT_DIR)/plugins ./hack/terraform_install.sh
-	@echo "Terraform and plugins successfully built and moved to $(OUT_DIR)"
+	TF_INSTALL_DIR=$(OUT_DIR) TF_PLUGIN_PATH=$(OUT_DIR) ./hack/terraform_install.sh
+	@echo "Terraform and plugins successfully built in $(OUT_DIR)"
 .PHONY: build-tf-and-plugins
 
-download-tf-plugins-from-cos: ## Download Terraform plugins from IBM Cloud COS
-	@echo "Downloading terraform plugins from IBM Cloud COS..."
-	@ARCH=$$(uname -m); \
-	. $(REPO_ROOT)/hack/terraform_versions.env; \
-	TF_PLUGIN_PATH="$$HOME/.terraform.d/plugins/registry.terraform.io"; \
-	DOWNLOAD_URL=$(COS_BUCKET_URL)/plugins/IBM-Cloud/ibm/$$TERRAFORM_PROVIDER_IBM_VERSION/linux_$$ARCH/terraform-provider-ibm; \
-	echo "Downloading terraform-provider-ibm for $$ARCH from $$DOWNLOAD_URL"; \
-	mkdir -p "$$TF_PLUGIN_PATH/IBM-Cloud/ibm/$$TERRAFORM_PROVIDER_IBM_VERSION/linux_$$ARCH"; \
-	if ! curl -fsSL -o "$$TF_PLUGIN_PATH/IBM-Cloud/ibm/$$TERRAFORM_PROVIDER_IBM_VERSION/linux_$$ARCH/terraform-provider-ibm" \
-		"$$DOWNLOAD_URL"; then \
-		echo "Error: Failed to download from $$DOWNLOAD_URL"; \
-		exit 1; \
-	fi; \
-	chmod +x "$$TF_PLUGIN_PATH/IBM-Cloud/ibm/$$TERRAFORM_PROVIDER_IBM_VERSION/linux_$$ARCH/terraform-provider-ibm"; \
-	DOWNLOAD_URL=$(COS_BUCKET_URL)/plugins/hashicorp/null/$$TERRAFORM_PROVIDER_NULL_VERSION/linux_$$ARCH/terraform-provider-null; \
-	echo "Downloading terraform-provider-null for $$ARCH from $$DOWNLOAD_URL"; \
-	mkdir -p "$$TF_PLUGIN_PATH/hashicorp/null/$$TERRAFORM_PROVIDER_NULL_VERSION/linux_$$ARCH"; \
-	if ! curl -fsSL -o "$$TF_PLUGIN_PATH/hashicorp/null/$$TERRAFORM_PROVIDER_NULL_VERSION/linux_$$ARCH/terraform-provider-null" \
-		"$$DOWNLOAD_URL"; then \
-		echo "Error: Failed to download from $$DOWNLOAD_URL"; \
-		exit 1; \
-	fi; \
-	chmod +x "$$TF_PLUGIN_PATH/hashicorp/null/$$TERRAFORM_PROVIDER_NULL_VERSION/linux_$$ARCH/terraform-provider-null"; \
-	echo "Successfully downloaded and installed terraform plugins to $$TF_PLUGIN_PATH"
-.PHONY: download-tf-plugins-from-cos
-
+place-tf-plugins: ## Place plugin binaries from $(OUT_DIR) to Terraform plugin path
+	@echo "Placing Terraform plugins in standard path..."
+	@. $(REPO_ROOT)/hack/terraform_versions.env; \
+	ARCH=$$(uname -m); \
+	TF_PLUGIN_BASE="$$HOME/.terraform.d/plugins/registry.terraform.io"; \
+	place_plugin() { \
+		local PROVIDER=$$1; \
+		local NAMESPACE=$$2; \
+		local VERSION=$$3; \
+		local VERSIONED_NAME="terraform-provider-$$PROVIDER-v$$VERSION"; \
+		if [ -f "$(OUT_DIR)/$$VERSIONED_NAME" ]; then \
+			PLUGIN_DEST="$$TF_PLUGIN_BASE/$$NAMESPACE/$$PROVIDER/$$VERSION/linux_$$ARCH"; \
+			echo "Placing $$VERSIONED_NAME to $$PLUGIN_DEST"; \
+			mkdir -p "$$PLUGIN_DEST"; \
+			cp -f "$(OUT_DIR)/$$VERSIONED_NAME" "$$PLUGIN_DEST/terraform-provider-$$PROVIDER"; \
+			chmod +x "$$PLUGIN_DEST/terraform-provider-$$PROVIDER"; \
+		fi; \
+	}; \
+	place_plugin "ibm" "IBM-Cloud" "$$TERRAFORM_PROVIDER_IBM_VERSION"; \
+	place_plugin "null" "hashicorp" "$$TERRAFORM_PROVIDER_NULL_VERSION"; \
+	echo "Successfully placed terraform plugins in $$TF_PLUGIN_BASE"
+.PHONY: place-tf-plugins
 
 install-deployer-tf: ## Install kubetest2-tf deployer from source or downloads prebuilt binaries from COS
 	@if [ "$$(uname -m)" = "ppc64le" ]; then \
 		$(MAKE) install-ansible; \
-		$(MAKE) download-from-cos WHAT='kubetest2-tf terraform'; \
-		$(MAKE) download-tf-plugins-from-cos; \
+		$(MAKE) download-from-cos WHAT="kubetest2-tf terraform terraform-provider-ibm terraform-provider-null"; \
+		$(MAKE) place-tf-plugins; \
 	else \
 		$(MAKE) install-prereq build-deployer-tf; \
 		$(INSTALL) -d $(INSTALL_DIR); \
@@ -123,20 +133,25 @@ download-from-cos: ## Download binaries from IBM Cloud COS (requires WHAT='binar
 	fi
 	@mkdir -p $(OUT_DIR)
 	$(INSTALL) -d $(INSTALL_DIR)
-	@for file in $(WHAT); do \
-		echo "Downloading $$file from IBM Cloud COS..."; \
-		if ! curl -fsSL -o $(OUT_DIR)/$$file $(COS_BUCKET_URL)/$$file; then \
-			echo "Error: Failed to download $$file from $(COS_BUCKET_URL)/$$file"; \
+	@. $(REPO_ROOT)/hack/terraform_versions.env; \
+	$(GET_VERSIONED_NAME); \
+	is_plugin() { \
+		[ "$$1" = "terraform-provider-ibm" ] || [ "$$1" = "terraform-provider-null" ]; \
+	}; \
+	for file in $(WHAT); do \
+		LOCAL_FILE=$$(get_versioned_name "$$file"); \
+		echo "Downloading $$file from IBM Cloud COS (as $$LOCAL_FILE)..."; \
+		if ! curl -fsSL -o $(OUT_DIR)/$$LOCAL_FILE $(COS_BUCKET_URL)/$$LOCAL_FILE; then \
+			echo "Error: Failed to download $$LOCAL_FILE from $(COS_BUCKET_URL)/$$LOCAL_FILE"; \
 			exit 1; \
 		fi; \
-		if [ ! -f "$(OUT_DIR)/$$file" ]; then \
-			echo "Error: Downloaded file $(OUT_DIR)/$$file does not exist"; \
-			exit 1; \
+		chmod +x $(OUT_DIR)/$$LOCAL_FILE; \
+		if is_plugin "$$file"; then \
+			echo "Downloaded plugin $$LOCAL_FILE to $(OUT_DIR)"; \
+		else \
+			echo "Installing $$file to $(INSTALL_DIR)..."; \
+			$(INSTALL) $(OUT_DIR)/$$LOCAL_FILE $(INSTALL_DIR)/$$file; \
 		fi; \
-		chmod +x $(OUT_DIR)/$$file; \
-		echo "Installing $$file to $(INSTALL_DIR)..."; \
-		$(INSTALL) $(OUT_DIR)/$$file $(INSTALL_DIR)/$$file; \
-		echo "Successfully installed $$file to $(INSTALL_DIR)/$$file"; \
 	done
 .PHONY: download-from-cos
 
@@ -151,9 +166,12 @@ push-to-cos: ## Upload binaries to IBM Cloud COS (requires WHAT, COS_SERVICE_CRE
 		echo "Error: COS_BUCKET_NAME is required."; \
 		exit 1; \
 	fi
-	@for file in $(WHAT); do \
-		if [ ! -f "$(OUT_DIR)/$$file" ]; then \
-			echo "Error: Local file $(OUT_DIR)/$$file does not exist. Please build or download it first."; \
+	@. $(REPO_ROOT)/hack/terraform_versions.env; \
+	$(GET_VERSIONED_NAME); \
+	for file in $(WHAT); do \
+		LOCAL_FILE=$$(get_versioned_name "$$file"); \
+		if [ ! -f "$(OUT_DIR)/$$LOCAL_FILE" ]; then \
+			echo "Error: Local file $(OUT_DIR)/$$LOCAL_FILE does not exist. Please build or download it first."; \
 			exit 1; \
 		fi; \
 	done
@@ -185,11 +203,14 @@ push-to-cos: ## Upload binaries to IBM Cloud COS (requires WHAT, COS_SERVICE_CRE
 		echo "  - COS_HMAC_ACCESS_KEY=xxx and COS_HMAC_SECRET_KEY=xxx"; \
 		exit 1; \
 	fi; \
+	. $(REPO_ROOT)/hack/terraform_versions.env; \
+	$(GET_VERSIONED_NAME); \
 	for file in $(WHAT); do \
-		echo "Uploading $$file to IBM Cloud COS bucket $(COS_BUCKET_NAME)..."; \
+		LOCAL_FILE=$$(get_versioned_name "$$file"); \
+		echo "Uploading $$file (as $$LOCAL_FILE) to IBM Cloud COS bucket $(COS_BUCKET_NAME)..."; \
 		DATE=$$(date -u +"%a, %d %b %Y %H:%M:%S GMT"); \
 		CONTENT_TYPE="application/octet-stream"; \
-		STRING_TO_SIGN="PUT\n\n$$CONTENT_TYPE\n$$DATE\nx-amz-acl:public-read\n/$(COS_BUCKET_NAME)/$$file"; \
+		STRING_TO_SIGN="PUT\n\n$$CONTENT_TYPE\n$$DATE\nx-amz-acl:public-read\n/$(COS_BUCKET_NAME)/$$LOCAL_FILE"; \
 		SIGNATURE=$$(printf "%b" "$$STRING_TO_SIGN" | openssl sha1 -hmac "$$COS_HMAC_SECRET_KEY" -binary | base64); \
 		curl -X PUT \
 			-H "Host: $(COS_ENDPOINT)" \
@@ -197,8 +218,8 @@ push-to-cos: ## Upload binaries to IBM Cloud COS (requires WHAT, COS_SERVICE_CRE
 			-H "Content-Type: $$CONTENT_TYPE" \
 			-H "Authorization: AWS $$COS_HMAC_ACCESS_KEY:$$SIGNATURE" \
 			-H "x-amz-acl: public-read" \
-			-T $(OUT_DIR)/$$file \
-			https://$(COS_ENDPOINT)/$$file; \
-		echo "Successfully uploaded $$file to $(COS_BUCKET_NAME)/$$file"; \
+			-T $(OUT_DIR)/$$LOCAL_FILE \
+			https://$(COS_ENDPOINT)/$$LOCAL_FILE; \
+		echo "Successfully uploaded $$file to $(COS_BUCKET_NAME)/$$LOCAL_FILE"; \
 	done
 .PHONY: push-to-cos
